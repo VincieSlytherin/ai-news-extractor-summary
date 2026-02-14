@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import logging
 from datetime import datetime
+from typing import Optional
 
 from openai import OpenAI
 
@@ -24,14 +27,109 @@ Format Rules:
 - Focus on quality over quantity — skip low-value or duplicate content
 - Output in clean Markdown format"""
 
+ARTICLE_SUMMARY_SYSTEM_PROMPT = """You are a senior AI/ML technical analyst. For each article provided,
+write a detailed and specific summary (摘要) in both Chinese and English.
+
+Requirements for each article summary:
+- 3-5 sentences covering: what the article is about, key technical details, main findings or announcements, and why it matters
+- Be SPECIFIC — include names, numbers, model names, benchmarks, companies, etc.
+- Chinese summary (中文摘要): Detailed, natural Chinese
+- English summary (English Abstract): Detailed, professional English
+- Output format: Use the exact format below for EACH article
+
+Format:
+### [Article Number]. {Title}
+**来源 / Source**: {source}
+**链接 / Link**: {url}
+
+**中文摘要**:
+{3-5 sentence detailed Chinese summary}
+
+**English Abstract**:
+{3-5 sentence detailed English summary}
+
+---"""
+
+ARTICLE_SUMMARY_USER_TEMPLATE = """Please generate a detailed summary (摘要) for each of the following {count} articles.
+Be specific and technical — include key details, numbers, and names mentioned in the articles.
+
+{articles_text}"""
+
 USER_PROMPT_TEMPLATE = """Here are today's ({date}) collected AI/ML/Agent articles.
 Please create a bilingual (中英双语) structured daily digest. Each article must have both Chinese and English summaries with the original link.
 
 {articles_text}"""
 
 
-def summarize(articles: list[Article], openai_config: dict) -> str:
-    """Generate a structured summary of articles using OpenAI API."""
+def summarize_articles(articles: list[Article], openai_config: dict) -> dict[str, str]:
+    """Generate a detailed per-article summary for each article using OpenAI API.
+
+    Returns a dict mapping article URL to its detailed summary text.
+    """
+    if not articles:
+        return {}
+
+    api_key = openai_config.get("api_key", "")
+    model = openai_config.get("model", "gpt-4o-mini")
+
+    client = OpenAI(api_key=api_key)
+    summaries: dict[str, str] = {}
+
+    # Process in batches of 10 to stay within token limits
+    batch_size = 10
+    for i in range(0, len(articles), batch_size):
+        batch = articles[i : i + batch_size]
+        articles_text = _format_articles(batch)
+
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": ARTICLE_SUMMARY_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": ARTICLE_SUMMARY_USER_TEMPLATE.format(
+                            count=len(batch), articles_text=articles_text
+                        ),
+                    },
+                ],
+                max_tokens=4000,
+                temperature=0.3,
+            )
+            batch_result = response.choices[0].message.content
+
+            # Map the full batch summary text back to each article URL
+            # Split by article sections and match
+            sections = batch_result.split("---")
+            for j, article in enumerate(batch):
+                if j < len(sections):
+                    summaries[article.url] = sections[j].strip()
+                else:
+                    summaries[article.url] = ""
+
+            logger.info(
+                "Generated summaries for articles %d-%d of %d",
+                i + 1, min(i + batch_size, len(articles)), len(articles),
+            )
+        except Exception as e:
+            logger.error(f"Per-article summary error (batch {i // batch_size + 1}): {e}")
+            for article in batch:
+                summaries[article.url] = ""
+
+    return summaries
+
+
+def summarize(
+    articles: list[Article],
+    openai_config: dict,
+    article_summaries: dict[str, str] | None = None,
+) -> str:
+    """Generate a structured digest of articles using OpenAI API.
+
+    If article_summaries is provided, they are included in the prompt to produce
+    a richer digest. The per-article summaries section is also appended to the
+    final output so readers can see every article's detailed abstract.
+    """
     if not articles:
         return "No new articles today."
 
@@ -41,34 +139,44 @@ def summarize(articles: list[Article], openai_config: dict) -> str:
 
     client = OpenAI(api_key=api_key)
 
-    # Format articles for the prompt
-    articles_text = _format_articles(articles)
+    # Format articles for the prompt, enriched with per-article summaries
+    articles_text = _format_articles(articles, article_summaries)
 
     # If content is very long, split into batches
     if len(articles_text) > 30000:
-        return _summarize_in_batches(client, model, max_tokens, articles)
+        digest = _summarize_in_batches(client, model, max_tokens, articles, article_summaries)
+    else:
+        today = datetime.now().strftime("%Y-%m-%d")
+        user_prompt = USER_PROMPT_TEMPLATE.format(date=today, articles_text=articles_text)
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    user_prompt = USER_PROMPT_TEMPLATE.format(date=today, articles_text=articles_text)
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            digest = response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"OpenAI API error: {e}")
+            digest = _fallback_summary(articles)
 
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=max_tokens,
-            temperature=0.3,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"OpenAI API error: {e}")
-        return _fallback_summary(articles)
+    # Append detailed per-article summaries section
+    if article_summaries:
+        digest += _build_article_summaries_section(articles, article_summaries)
+
+    return digest
 
 
 def _summarize_in_batches(
-    client: OpenAI, model: str, max_tokens: int, articles: list[Article]
+    client: OpenAI,
+    model: str,
+    max_tokens: int,
+    articles: list[Article],
+    article_summaries: dict[str, str] | None = None,
 ) -> str:
     """Split articles into batches and summarize each, then merge."""
     batch_size = 15
@@ -76,7 +184,7 @@ def _summarize_in_batches(
 
     for i in range(0, len(articles), batch_size):
         batch = articles[i : i + batch_size]
-        articles_text = _format_articles(batch)
+        articles_text = _format_articles(batch, article_summaries)
         today = datetime.now().strftime("%Y-%m-%d")
 
         try:
@@ -126,17 +234,44 @@ def _summarize_in_batches(
         return "\n\n---\n\n".join(partial_summaries)
 
 
-def _format_articles(articles: list[Article]) -> str:
-    """Format articles into a text block for the prompt."""
+def _format_articles(
+    articles: list[Article], article_summaries: dict[str, str] | None = None
+) -> str:
+    """Format articles into a text block for the prompt.
+
+    When per-article summaries are available, they are appended to each article
+    so the digest LLM can leverage them for a richer output.
+    """
+    summaries = article_summaries or {}
     parts = []
     for i, a in enumerate(articles, 1):
-        parts.append(
+        block = (
             f"[{i}] **{a.title}**\n"
             f"Source: {a.source} | Category: {a.category}\n"
             f"URL: {a.url}\n"
             f"Content: {a.content}\n"
         )
+        summary = summaries.get(a.url, "")
+        if summary:
+            block += f"Detailed Summary: {summary}\n"
+        parts.append(block)
     return "\n".join(parts)
+
+
+def _build_article_summaries_section(
+    articles: list[Article], article_summaries: dict[str, str]
+) -> str:
+    """Build the per-article detailed summaries appendix for the final digest."""
+    lines = [
+        "\n\n---\n",
+        "# 每篇文章详细摘要 / Detailed Article Summaries\n",
+    ]
+    for i, a in enumerate(articles, 1):
+        summary = article_summaries.get(a.url, "")
+        if not summary:
+            continue
+        lines.append(f"\n{summary}\n")
+    return "\n".join(lines)
 
 
 def _fallback_summary(articles: list[Article]) -> str:

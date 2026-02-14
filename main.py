@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from emailer import send_email
 from scraper import scrape_all
 from storage import Storage
-from summarizer import summarize
+from summarizer import summarize, summarize_articles
 
 PROJECT_DIR = Path(__file__).parent
 DATA_DIR = PROJECT_DIR / "data"
@@ -80,12 +80,17 @@ async def run(dry_run: bool = False):
             logger.info("No new articles. Done.")
             return
 
-        # 3. Generate AI summary
-        logger.info("Generating AI summary...")
-        summary = summarize(new_articles, config["openai"])
-        logger.info("Summary generated (%d chars)", len(summary))
+        # 3. Generate per-article detailed summaries
+        logger.info("Generating per-article summaries for %d articles...", len(new_articles))
+        article_summaries = summarize_articles(new_articles, config["openai"])
+        logger.info("Per-article summaries generated (%d articles)", len(article_summaries))
 
-        # 4. Send email or print
+        # 4. Generate overall AI digest (enriched with per-article summaries)
+        logger.info("Generating AI digest...")
+        summary = summarize(new_articles, config["openai"], article_summaries)
+        logger.info("Digest generated (%d chars)", len(summary))
+
+        # 5. Send email or print
         if dry_run:
             print("\n" + "=" * 60)
             print(summary)
@@ -101,11 +106,11 @@ async def run(dry_run: bool = False):
                 print(summary)
                 print("=" * 60)
 
-        # 5. Save articles to DB for deduplication
-        db.save(new_articles)
+        # 6. Save articles to DB for deduplication (with per-article summaries)
+        db.save(new_articles, summaries=article_summaries)
         logger.info("Saved %d articles to database", len(new_articles))
 
-        # 6. Cleanup old records
+        # 7. Cleanup old records
         db.cleanup(days=30)
 
     finally:
