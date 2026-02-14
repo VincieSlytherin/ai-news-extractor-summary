@@ -1,0 +1,116 @@
+sites:
+  # --- News Sites ---
+  - name: "Hacker News"
+    type: "api"
+    url: "https://hacker-news.firebaseio.com/v0"
+    category: "news"
+
+  - name: "TechCrunch AI"
+    type: "rss"
+    url: "https://techcrunch.com/category/artificial-intelligence/feed/"
+    category: "news"
+
+  - name: "The Verge AI"
+    type: "rss"
+    url: "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml"
+    category: "news"
+
+  - name: "ArXiv CS.AI"
+    type: "rss"
+    url: "http://arxiv.org/rss/cs.AI"
+    category: "research"
+
+  # --- Engineering Blogs ---
+  - name: "Uber Engineering"
+    type: "rss"
+    url: "https://www.uber.com/blog/engineering/rss/"
+    category: "engineering"
+
+  - name: "Netflix TechBlog"
+    type: "rss"
+    url: "https://medium.com/feed/netflix-techblog"
+    category: "engineering"
+
+  - name: "Airbnb Tech"
+    type: "rss"
+    url: "https://medium.com/feed/airbnb-engineering"
+    category: "engineering"
+
+  - name: "Stripe Engineering"
+    type: "rss"
+    url: "https://stripe.com/blog/feed.rss"
+    category: "engineering"
+
+  - name: "Databricks"
+    type: "rss"
+    url: "https://www.databricks.com/feed"
+    category: "engineering"
+
+  - name: "Anthropic Engineering"
+    type: "rss"
+    url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_engineering.xml"
+    category: "engineering"
+
+  - name: "Anthropic Research"
+    type: "rss"
+    url: "https://raw.githubusercontent.com/Olshansk/rss-feeds/main/feeds/feed_anthropic_research.xml"
+    category: "research"
+
+  # --- Personal Blogs ---
+  - name: "Andrej Karpathy"
+    type: "rss"
+    url: "https://karpathy.bearblog.dev/feed/"
+    category: "personal"
+
+  - name: "Chip Huyen"
+    type: "rss"
+    url: "https://huyenchip.com/feed.xml"
+    category: "personal"
+
+  - name: "Lilian Weng"
+    type: "rss"
+    url: "https://lilianweng.github.io/index.xml"
+    category: "personal"
+
+  - name: "LangChain Blog"
+    type: "rss"
+    url: "https://blog.langchain.com/rss/"
+    category: "personal"
+
+  - name: "Swyx"
+    type: "rss"
+    url: "https://www.swyx.io/rss.xml"
+    category: "personal"
+
+  - name: "Latent.Space"
+    type: "rss"
+    url: "https://www.latent.space/feed"
+    category: "personal"
+
+  # --- Chinese Sites ---
+  - name: "机器之心"
+    type: "web"
+    url: "https://www.jiqizhixin.com"
+    selector: "article"
+    category: "chinese"
+
+  - name: "量子位"
+    type: "web"
+    url: "https://www.qbitai.com"
+    selector: "article"
+    category: "chinese"
+
+  - name: "36Kr AI"
+    type: "web"
+    url: "https://36kr.com/information/AI/"
+    selector: "article"
+    category: "chinese"
+
+openai:
+  model: "gpt-4o-mini"
+  max_tokens: 4000
+
+email:
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 587
+  # sender, recipient, password are read from .env (EMAIL_SENDER, EMAIL_RECIPIENT, EMAIL_PASSWORD)
