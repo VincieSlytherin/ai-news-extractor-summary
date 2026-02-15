@@ -10,6 +10,16 @@ from storage import Article
 
 logger = logging.getLogger(__name__)
 
+# GPT-5+ models require max_completion_tokens instead of max_tokens
+_NEW_TOKEN_PARAM_MODELS = ("gpt-5", "o1", "o3")
+
+
+def _token_limit_param(model: str, max_tokens: int) -> dict:
+    """Return the correct token-limit kwarg for the given model."""
+    if any(model.startswith(prefix) for prefix in _NEW_TOKEN_PARAM_MODELS):
+        return {"max_completion_tokens": max_tokens}
+    return {"max_tokens": max_tokens}
+
 SYSTEM_PROMPT = """You are an AI news digest curator. Create a bilingual (Chinese + English) daily digest
 of AI/ML/Agent news and blog posts for a technical reader.
 
@@ -93,7 +103,7 @@ def summarize_articles(articles: list[Article], openai_config: dict) -> dict[str
                         ),
                     },
                 ],
-                max_tokens=4000,
+                **_token_limit_param(model, 4000),
                 temperature=0.3,
             )
             batch_result = response.choices[0].message.content
@@ -156,7 +166,7 @@ def summarize(
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_tokens=max_tokens,
+                **_token_limit_param(model, max_tokens),
                 temperature=0.3,
             )
             digest = response.choices[0].message.content
@@ -199,7 +209,7 @@ def _summarize_in_batches(
                         ),
                     },
                 ],
-                max_tokens=max_tokens,
+                **_token_limit_param(model, max_tokens),
                 temperature=0.3,
             )
             partial_summaries.append(response.choices[0].message.content)
@@ -225,7 +235,7 @@ def _summarize_in_batches(
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": merge_prompt},
             ],
-            max_tokens=max_tokens,
+            **_token_limit_param(model, max_tokens),
             temperature=0.3,
         )
         return response.choices[0].message.content

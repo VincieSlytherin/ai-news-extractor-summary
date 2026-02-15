@@ -107,7 +107,7 @@ sites:
     category: "chinese"
 
 openai:
-  model: "gpt-4o-mini"
+  model: "gpt-5.2"
   max_tokens: 4000
 
 email:
