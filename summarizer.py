@@ -34,7 +34,7 @@ Format Rules:
   4. Key takeaway / 关键要点: one bilingual sentence
   5. Source and link: [Source](original_url)
 - Every article MUST include its original URL as a clickable Markdown link
-- Focus on quality over quantity — skip low-value or duplicate content
+- You MUST cover ALL articles provided — do not skip any article
 - Output in clean Markdown format"""
 
 ARTICLE_SUMMARY_SYSTEM_PROMPT = """You are a senior AI/ML technical analyst. For each article provided,
@@ -103,7 +103,7 @@ def summarize_articles(articles: list[Article], openai_config: dict) -> dict[str
                         ),
                     },
                 ],
-                **_token_limit_param(model, 4000),
+                **_token_limit_param(model, 8000),
                 temperature=0.3,
             )
             batch_result = response.choices[0].message.content
