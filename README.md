@@ -1,6 +1,19 @@
 # AI News Aggregator / AI 每日速递
 
-A single-machine Python tool that crawls daily AI/Agent/ML news from top engineering blogs, personal blogs, and news sites, generates a **bilingual (Chinese + English)** digest using OpenAI, and emails it to you.
+A Python pipeline that concurrently scrapes 20+ AI/ML sources, deduplicates stories semantically using OpenAI embeddings, generates a bilingual (Chinese + English) digest, emails it via Gmail, and exposes a web dashboard to browse past digests and articles.
+
+## Pipeline
+
+```
+Scrape (RSS/API/Web)
+  → URL dedup (SQLite)
+  → Semantic dedup (embeddings + cosine similarity)
+  → Full-text extraction (trafilatura)
+  → Per-article AI summaries (OpenAI)
+  → Digest generation (OpenAI, bilingual)
+  → Email delivery (Gmail SMTP)
+  → Web dashboard (Streamlit)
+```
 
 ## Sources
 
@@ -8,7 +21,7 @@ A single-machine Python tool that crawls daily AI/Agent/ML news from top enginee
 |---|---|
 | News | Hacker News, TechCrunch AI, The Verge AI, ArXiv CS.AI |
 | Engineering Blogs | Uber Engineering, Netflix TechBlog, Airbnb Tech, Stripe Engineering, Databricks, Anthropic |
-| Personal Blogs | Andrej Karpathy, Chip Huyen, Lilian Weng, LangChain (Harrison Chase), Swyx, Latent.Space |
+| Personal Blogs | Andrej Karpathy, Chip Huyen, Lilian Weng, LangChain, Swyx, Latent.Space |
 | Chinese Sites | 机器之心, 量子位, 36Kr AI |
 
 ## Quick Start
@@ -23,8 +36,6 @@ pip install -r requirements.txt
 
 ### 2. Configure secrets
 
-Copy the example env file and fill in your credentials:
-
 ```bash
 cp .env.example .env
 ```
@@ -38,41 +49,75 @@ EMAIL_SENDER=your-email@gmail.com
 EMAIL_RECIPIENT=your-email@gmail.com
 ```
 
-> **Gmail App Password**: You need a Gmail App Password, not your regular password.
-> Go to [Google Account](https://myaccount.google.com/) > Security > 2-Step Verification > App passwords, then generate one for "Mail".
+> **Gmail App Password**: Go to [Google Account](https://myaccount.google.com/) > Security > 2-Step Verification > App passwords, generate one for "Mail".
 
 ### 3. Run
 
 ```bash
-# Full run: scrape + summarize + send email
+# Full run: scrape + deduplicate + summarize + email
 python main.py
 
-# Dry run: scrape + summarize, print to console (no email sent)
+# Dry run: print digest to console, no email sent
 python main.py --dry-run
+
+# Skip semantic deduplication (saves embedding API tokens)
+python main.py --no-semantic-dedup
+```
+
+### 4. Web dashboard
+
+```bash
+streamlit run dashboard.py
+# Open http://localhost:8501
 ```
 
 ## How It Works
 
-```
-Scrape (RSS/API/Web)  →  Deduplicate (SQLite)  →  Summarize (OpenAI)  →  Email (Gmail SMTP)
-```
+### 1. Scrape
+Concurrently fetches all configured sources using `asyncio` + `httpx`. Supports three source types:
+- **RSS/Atom** — feedparser, filters to last 3 days
+- **Hacker News API** — top 60 stories filtered by 30+ AI keywords
+- **Web** — BeautifulSoup CSS selector extraction
 
-1. **Scrape** — Concurrently fetches all configured sources (RSS feeds, Hacker News API, web pages)
-2. **Deduplicate** — Filters out articles already seen (stored in `data/news.db`)
-3. **Summarize** — Sends articles to OpenAI to generate a bilingual digest grouped by theme
-4. **Email** — Converts Markdown to styled HTML and sends via Gmail SMTP
+### 2. URL Deduplication
+Filters out articles whose URLs are already stored in SQLite (`data/news.db`). Records are retained for 30 days.
+
+### 3. Semantic Deduplication
+Uses `text-embedding-3-small` to embed each article (title + content snippet), then computes cosine similarity against embeddings from the past 7 days. Articles above a 0.90 similarity threshold are dropped as near-duplicates — catching the same story covered by multiple outlets. Embeddings are stored in the DB for future runs.
+
+### 4. Full-Text Extraction
+Fetches the full article page and extracts main body text using `trafilatura` (up to 5,000 characters). Falls back to the original RSS snippet if extraction fails or returns too little text. Only runs on articles that survived deduplication, minimising unnecessary requests.
+
+### 5. AI Summarization (two-pass)
+- **Pass 1** — Each article gets a detailed bilingual summary (3–5 sentences, specific facts/numbers/names), processed in batches of 10.
+- **Pass 2** — All articles and their Pass 1 summaries are sent together to generate a thematic digest grouped by topic (LLM advances, industry news, research papers, engineering practices, agent tools).
+
+### 6. Email Delivery
+Converts the Markdown digest to styled HTML and sends via Gmail SMTP with STARTTLS. Retries once on failure.
+
+### 7. Web Dashboard
+Streamlit app with four pages:
+- **Overview** — article counts, last run status, charts by source and category
+- **Digest History** — browse and read any past digest
+- **Article Browser** — search and filter all stored articles with their AI summaries
+- **Run Logs** — history of pipeline runs with status, duration, and error details
 
 ## Project Structure
 
 ```
-├── main.py            # Entry point and pipeline orchestration
-├── scraper.py         # RSS, Hacker News API, and web scrapers
-├── summarizer.py      # OpenAI-powered bilingual summary generation
-├── emailer.py         # Gmail SMTP email sender with HTML template
-├── storage.py         # SQLite storage for article deduplication
+├── main.py            # Pipeline orchestration
+├── scraper.py         # RSS, Hacker News, web scrapers + full-text enrichment
+├── deduper.py         # Semantic deduplication via OpenAI embeddings
+├── summarizer.py      # Two-pass bilingual summarization
+├── emailer.py         # Gmail SMTP delivery with HTML template
+├── storage.py         # SQLite: articles, digests, run history
+├── dashboard.py       # Streamlit web dashboard
 ├── config.yaml        # Source list and non-secret settings
-├── .env.example       # Template for secret configuration
+├── .env.example       # Secret configuration template
 ├── requirements.txt   # Python dependencies
+├── Dockerfile         # Container image
+├── docker-compose.yml # Aggregator + dashboard services
+├── k8s.yaml           # Kubernetes CronJob + Secret + PVC
 └── data/              # Auto-created: SQLite DB + run logs
 ```
 
@@ -80,7 +125,7 @@ Scrape (RSS/API/Web)  →  Deduplicate (SQLite)  →  Summarize (OpenAI)  →  E
 
 ### Add or remove sources
 
-Edit `config.yaml`. Each source needs a `name`, `type`, `url`, and `category`:
+Edit `config.yaml`:
 
 ```yaml
 - name: "New Blog"
@@ -101,50 +146,37 @@ openai:
 
 ## Docker Deployment
 
-Docker lets you run the aggregator on any server without installing Python or dependencies.
-
-### Option A: Docker (single run)
+### Run with Docker Compose
 
 ```bash
 # 1. Clone and configure
 git clone https://github.com/VincieSlytherin/ai-news-extractor-summary.git
 cd ai-news-extractor-summary
 cp .env.example .env
-# Edit .env with your OpenAI key and Gmail credentials
+# Edit .env with your credentials
 
-# 2. Build the image
-docker build -t ai-news-aggregator .
+# 2. Start the dashboard (persistent)
+docker compose up dashboard
+# Open http://localhost:8501
 
-# 3. Run once (mounts ./data so the SQLite DB persists between runs)
-docker run --rm --env-file .env -v "$(pwd)/data:/app/data" ai-news-aggregator
+# 3. Run the aggregator once (scrape + summarize + email)
+docker compose run --rm aggregator
 
-# Dry run (prints digest to console, no email sent)
-docker run --rm --env-file .env -v "$(pwd)/data:/app/data" ai-news-aggregator python main.py --dry-run
+# Dry run (no email)
+docker compose run --rm aggregator python main.py --dry-run
 ```
 
-### Option B: Docker Compose
-
-```bash
-# Run once
-docker compose run --rm ai-news-aggregator
-
-# Dry run
-docker compose run --rm ai-news-aggregator python main.py --dry-run
-```
-
-### Scheduling with cron (Linux/Mac server)
-
-Add to your crontab (`crontab -e`) to run every day at 8:00 AM:
+### Schedule with cron (Linux/Mac server)
 
 ```
-0 8 * * * cd /path/to/ai-news-aggregator && docker compose run --rm ai-news-aggregator >> /var/log/ai-news.log 2>&1
+0 8 * * * cd /path/to/ai-news-aggregator && docker compose run --rm aggregator >> /var/log/ai-news.log 2>&1
 ```
 
 ---
 
 ## Kubernetes Deployment
 
-For users who already have a Kubernetes cluster (e.g. self-hosted k3s, or a cloud cluster).
+For users with an existing Kubernetes cluster (e.g. self-hosted k3s, or a cloud cluster).
 
 ### 1. Build and push your image
 
@@ -155,36 +187,24 @@ docker push your-dockerhub-username/ai-news-aggregator:latest
 
 ### 2. Edit k8s.yaml
 
-Open [k8s.yaml](k8s.yaml) and fill in two things:
+Open [k8s.yaml](k8s.yaml) and fill in:
 
-- **Secret** — your OpenAI API key and Gmail credentials (under `stringData`)
-- **Image** — replace `your-dockerhub-username/ai-news-aggregator:latest` with your actual image
+- **Secret** — your credentials under `stringData`
+- **Image** — replace `your-dockerhub-username/ai-news-aggregator:latest`
 
-You can also change the schedule (`0 8 * * *` = daily at 8:00 AM UTC).
+Change the schedule if needed (`0 8 * * *` = daily at 8:00 AM UTC).
 
 ### 3. Deploy
 
 ```bash
 kubectl apply -f k8s.yaml
 
-# Verify the CronJob was created
+# Verify
 kubectl get cronjob ai-news-aggregator
 
-# Trigger a manual run to test
+# Trigger a manual test run
 kubectl create job --from=cronjob/ai-news-aggregator ai-news-test
-
-# Watch the logs
 kubectl logs -l job-name=ai-news-test -f
-```
-
-### 4. Check results
-
-```bash
-# List past job runs
-kubectl get jobs
-
-# Get logs from the latest run
-kubectl logs -l app=ai-news-aggregator --tail=50
 ```
 
 ---
@@ -193,12 +213,13 @@ kubectl logs -l app=ai-news-aggregator --tail=50
 
 | Component | Cost |
 |-----------|------|
-| Server / Kubernetes cluster | **Free** if self-hosted (e.g. your own machine, Oracle Cloud free tier) |
-| Docker image hosting | **Free** (Docker Hub free tier) |
-| OpenAI API | ~$1–10/month depending on model and run frequency |
+| Server / cluster | **Free** if self-hosted (e.g. Oracle Cloud free tier) |
+| Docker Hub | **Free** (free tier) |
+| OpenAI API (summaries) | ~$1–10/month depending on model and frequency |
+| OpenAI API (embeddings) | ~$0.02/month (`text-embedding-3-small`) |
 | Gmail SMTP | **Free** |
 
-Each user runs their own instance with their own API key — there is no shared cost.
+Each user runs their own instance with their own API key — no shared cost.
 
 ---
 

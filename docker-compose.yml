@@ -1,6 +1,18 @@
 services:
-  ai-news-aggregator:
+  # One-shot pipeline: scrape + summarize + email
+  aggregator:
     build: .
     env_file: .env
     volumes:
       - ./data:/app/data
+
+  # Persistent web dashboard (http://localhost:8501)
+  dashboard:
+    build: .
+    command: streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
+    env_file: .env
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

@@ -5,20 +5,21 @@ import argparse
 import asyncio
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
 
+from deduper import filter_semantic_duplicates
 from emailer import send_email
-from scraper import scrape_all
+from scraper import enrich_with_full_content, scrape_all
 from storage import Storage
 from summarizer import summarize, summarize_articles
 
 PROJECT_DIR = Path(__file__).parent
 DATA_DIR = PROJECT_DIR / "data"
 
-# Ensure data directory exists before setting up file logging
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
@@ -40,7 +41,6 @@ def load_config() -> dict:
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
-    # Resolve secrets from environment
     config.setdefault("openai", {})
     config["openai"]["api_key"] = os.environ.get("OPENAI_API_KEY", "")
 
@@ -59,12 +59,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print digest to console without sending email",
     )
+    parser.add_argument(
+        "--no-semantic-dedup",
+        action="store_true",
+        help="Skip semantic deduplication (saves embedding API tokens)",
+    )
     return parser.parse_args()
 
 
-async def run(dry_run: bool = False):
+async def run(dry_run: bool = False, semantic_dedup: bool = True):
     config = load_config()
     db = Storage(str(DATA_DIR / "news.db"))
+    run_id = db.start_run()
+    today = datetime.now().strftime("%Y-%m-%d")
 
     try:
         # 1. Scrape all sites
@@ -72,25 +79,42 @@ async def run(dry_run: bool = False):
         articles = await scrape_all(config["sites"])
         logger.info("Scraped %d total articles", len(articles))
 
-        # 2. Filter out already-seen articles
+        # 2. URL deduplication
         new_articles = db.filter_new(articles)
-        logger.info("Found %d new articles", len(new_articles))
+        logger.info("Found %d new articles after URL dedup", len(new_articles))
 
         if not new_articles:
             logger.info("No new articles. Done.")
+            db.finish_run(run_id, "success", scraped=len(articles), new_articles=0)
             return
 
-        # 3. Generate per-article detailed summaries
+        # 3. Semantic deduplication (drops near-duplicate cross-source stories)
+        article_embeddings: dict = {}
+        if semantic_dedup:
+            logger.info("Running semantic deduplication...")
+            stored_embs = db.get_recent_embeddings(days=7)
+            new_articles, article_embeddings = filter_semantic_duplicates(
+                new_articles, stored_embs, config["openai"]
+            )
+            if not new_articles:
+                logger.info("All articles were semantic duplicates. Done.")
+                db.finish_run(run_id, "success", scraped=len(articles), new_articles=0)
+                return
+
+        # 4. Fetch full article content (replaces RSS snippets with full text)
+        logger.info("Fetching full article content for %d articles...", len(new_articles))
+        new_articles = await enrich_with_full_content(new_articles)
+
+        # 5. Per-article AI summaries
         logger.info("Generating per-article summaries for %d articles...", len(new_articles))
         article_summaries = summarize_articles(new_articles, config["openai"])
-        logger.info("Per-article summaries generated (%d articles)", len(article_summaries))
 
-        # 4. Generate overall AI digest (enriched with per-article summaries)
+        # 6. Overall digest
         logger.info("Generating AI digest...")
         summary = summarize(new_articles, config["openai"], article_summaries)
         logger.info("Digest generated (%d chars)", len(summary))
 
-        # 5. Send email or print
+        # 7. Deliver: email or console
         if dry_run:
             print("\n" + "=" * 60)
             print(summary)
@@ -106,20 +130,31 @@ async def run(dry_run: bool = False):
                 print(summary)
                 print("=" * 60)
 
-        # 6. Save articles to DB for deduplication (with per-article summaries)
-        db.save(new_articles, summaries=article_summaries)
-        logger.info("Saved %d articles to database", len(new_articles))
+        # 8. Persist to DB
+        db.save(new_articles, summaries=article_summaries, embeddings=article_embeddings)
+        db.save_digest(today, summary, article_count=len(new_articles))
+        logger.info("Saved %d articles and digest to database", len(new_articles))
 
-        # 7. Cleanup old records
+        # 9. Cleanup records older than 30 days
         db.cleanup(days=30)
 
+        db.finish_run(
+            run_id, "success",
+            scraped=len(articles),
+            new_articles=len(new_articles),
+        )
+
+    except Exception as e:
+        logger.exception("Pipeline failed: %s", e)
+        db.finish_run(run_id, "error", error=str(e))
+        raise
     finally:
         db.close()
 
 
 def main():
     args = parse_args()
-    asyncio.run(run(dry_run=args.dry_run))
+    asyncio.run(run(dry_run=args.dry_run, semantic_dedup=not args.no_semantic_dedup))
 
 
 if __name__ == "__main__":

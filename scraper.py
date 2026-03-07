@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import feedparser
 import httpx
+import trafilatura
 from bs4 import BeautifulSoup
 
 from storage import Article
@@ -204,6 +205,50 @@ async def _scrape_web(client: httpx.AsyncClient, site: dict) -> list[Article]:
         ))
 
     return articles
+
+
+async def enrich_with_full_content(articles: list[Article]) -> list[Article]:
+    """Fetch full article text for each article using trafilatura.
+
+    Falls back to the original snippet content if fetching or extraction fails.
+    Called after URL and semantic deduplication to minimise unnecessary requests.
+    """
+    async with httpx.AsyncClient(headers=HEADERS, timeout=20, follow_redirects=True) as client:
+        tasks = [_fetch_article_text(client, a) for a in articles]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    enriched = []
+    for article, result in zip(articles, results):
+        if isinstance(result, Exception):
+            logger.debug("Full-text fetch failed for %s: %s", article.url, result)
+            enriched.append(article)
+        else:
+            enriched.append(result)
+    return enriched
+
+
+async def _fetch_article_text(client: httpx.AsyncClient, article: Article) -> Article:
+    """Fetch and extract main body text from an article URL."""
+    try:
+        resp = await client.get(article.url)
+        text = trafilatura.extract(
+            resp.text,
+            include_comments=False,
+            include_tables=False,
+            no_fallback=False,
+        )
+        if text and len(text) > 200:
+            return Article(
+                title=article.title,
+                url=article.url,
+                content=text[:5000],
+                source=article.source,
+                category=article.category,
+                date=article.date,
+            )
+    except Exception:
+        pass
+    return article  # fallback to original snippet
 
 
 def _clean_html(html: str) -> str:
