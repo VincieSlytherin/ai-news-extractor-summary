@@ -1,6 +1,6 @@
 # AI News Aggregator / AI 每日速递
 
-A Python pipeline that concurrently scrapes 20+ AI/ML sources, deduplicates stories semantically using OpenAI embeddings, generates a bilingual (Chinese + English) digest, emails it via Gmail, and exposes a web dashboard to browse past digests and articles.
+A Python pipeline that concurrently scrapes 20+ AI/ML sources, deduplicates stories semantically using OpenAI embeddings, generates a bilingual (Chinese + English) digest, evaluates summary quality with LLM-as-judge, and exposes the data via a Streamlit dashboard, a REST API, and a ChromaDB-backed semantic search interface.
 
 ## Pipeline
 
@@ -9,10 +9,11 @@ Scrape (RSS/API/Web)
   → URL dedup (SQLite)
   → Semantic dedup (embeddings + cosine similarity)
   → Full-text extraction (trafilatura)
-  → Per-article AI summaries (OpenAI)
+  → Per-article AI summaries (OpenAI, two-pass)
   → Digest generation (OpenAI, bilingual)
+  → LLM-as-judge evaluation (faithfulness + coverage)
   → Email delivery (Gmail SMTP)
-  → Web dashboard (Streamlit)
+  → ChromaDB upsert (semantic search index)
 ```
 
 ## Sources
@@ -54,7 +55,7 @@ EMAIL_RECIPIENT=your-email@gmail.com
 ### 3. Run
 
 ```bash
-# Full run: scrape + deduplicate + summarize + email
+# Full run: scrape + deduplicate + summarize + evaluate + email
 python main.py
 
 # Dry run: print digest to console, no email sent
@@ -62,6 +63,9 @@ python main.py --dry-run
 
 # Skip semantic deduplication (saves embedding API tokens)
 python main.py --no-semantic-dedup
+
+# Skip LLM-as-judge evaluation (saves API tokens)
+python main.py --skip-eval
 ```
 
 ### 4. Web dashboard
@@ -70,6 +74,21 @@ python main.py --no-semantic-dedup
 streamlit run dashboard.py
 # Open http://localhost:8501
 ```
+
+### 5. REST API
+
+```bash
+uvicorn api:app --reload
+# Open http://localhost:8000/docs
+```
+
+## Services
+
+| Service | Command | URL |
+|---------|---------|-----|
+| Dashboard | `streamlit run dashboard.py` | http://localhost:8501 |
+| REST API | `uvicorn api:app` | http://localhost:8000 |
+| API docs | — | http://localhost:8000/docs |
 
 ## How It Works
 
@@ -83,24 +102,27 @@ Concurrently fetches all configured sources using `asyncio` + `httpx`. Supports 
 Filters out articles whose URLs are already stored in SQLite (`data/news.db`). Records are retained for 30 days.
 
 ### 3. Semantic Deduplication
-Uses `text-embedding-3-small` to embed each article (title + content snippet), then computes cosine similarity against embeddings from the past 7 days. Articles above a 0.90 similarity threshold are dropped as near-duplicates — catching the same story covered by multiple outlets. Embeddings are stored in the DB for future runs.
+Uses `text-embedding-3-small` to embed each article (title + content snippet), then computes cosine similarity against embeddings from the past 7 days. Articles above a 0.90 similarity threshold are dropped as near-duplicates — catching the same story covered by multiple outlets. Embeddings are stored in SQLite for future runs.
 
 ### 4. Full-Text Extraction
-Fetches the full article page and extracts main body text using `trafilatura` (up to 5,000 characters). Falls back to the original RSS snippet if extraction fails or returns too little text. Only runs on articles that survived deduplication, minimising unnecessary requests.
+Fetches the full article page and extracts main body text using `trafilatura` (up to 5,000 characters). Falls back to the original RSS snippet if extraction fails. Only runs on articles that survived deduplication, minimising unnecessary requests.
 
 ### 5. AI Summarization (two-pass)
 - **Pass 1** — Each article gets a detailed bilingual summary (3–5 sentences, specific facts/numbers/names), processed in batches of 10.
 - **Pass 2** — All articles and their Pass 1 summaries are sent together to generate a thematic digest grouped by topic (LLM advances, industry news, research papers, engineering practices, agent tools).
 
-### 6. Email Delivery
+### 6. LLM-as-Judge Evaluation
+After summarization, `gpt-4o-mini` scores each summary on two dimensions (0–10):
+- **Faithfulness** — does the summary accurately reflect the article without hallucinations?
+- **Coverage** — does it cover the article's main points?
+
+Scores are stored in SQLite and visualised as a quality trend chart in the dashboard's Overview page.
+
+### 7. Email Delivery
 Converts the Markdown digest to styled HTML and sends via Gmail SMTP with STARTTLS. Retries once on failure.
 
-### 7. Web Dashboard
-Streamlit app with four pages:
-- **Overview** — article counts, last run status, charts by source and category
-- **Digest History** — browse and read any past digest
-- **Article Browser** — search and filter all stored articles with their AI summaries
-- **Run Logs** — history of pipeline runs with status, duration, and error details
+### 8. ChromaDB Semantic Search
+Articles and their AI summaries are upserted into a persistent ChromaDB collection (`data/chroma/`) after each run. Pre-computed embeddings from the deduplication step are reused — no extra API calls. The Streamlit dashboard's **Semantic Search** page queries this collection by natural language.
 
 ## Project Structure
 
@@ -109,17 +131,37 @@ Streamlit app with four pages:
 ├── scraper.py         # RSS, Hacker News, web scrapers + full-text enrichment
 ├── deduper.py         # Semantic deduplication via OpenAI embeddings
 ├── summarizer.py      # Two-pass bilingual summarization
+├── evaluator.py       # LLM-as-judge faithfulness + coverage scoring
+├── rag.py             # ChromaDB vector store: upsert + semantic search
+├── api.py             # FastAPI REST service
 ├── emailer.py         # Gmail SMTP delivery with HTML template
-├── storage.py         # SQLite: articles, digests, run history
-├── dashboard.py       # Streamlit web dashboard
+├── storage.py         # SQLite: articles, digests, evaluations, run history
+├── dashboard.py       # Streamlit web dashboard (5 pages)
 ├── config.yaml        # Source list and non-secret settings
 ├── .env.example       # Secret configuration template
 ├── requirements.txt   # Python dependencies
 ├── Dockerfile         # Container image
-├── docker-compose.yml # Aggregator + dashboard services
+├── docker-compose.yml # Aggregator + dashboard + API services
 ├── k8s.yaml           # Kubernetes CronJob + Secret + PVC
-└── data/              # Auto-created: SQLite DB + run logs
+└── data/              # Auto-created: SQLite DB + ChromaDB + run logs
+    ├── news.db
+    ├── chroma/
+    └── run.log
 ```
+
+## REST API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/stats` | Article counts, source breakdown, last run |
+| GET | `/api/digests` | List of past digests (metadata) |
+| GET | `/api/digest/{date}` | Full digest by date (YYYY-MM-DD) |
+| GET | `/api/articles` | Articles with keyword search + category filter |
+| GET | `/api/quality/trend` | Daily avg faithfulness + coverage scores |
+| GET | `/api/quality/evaluations` | Per-article evaluation scores |
+| GET | `/api/runs` | Pipeline run history |
+
+Interactive docs available at `/docs`.
 
 ## Configuration
 
@@ -140,7 +182,8 @@ Edit `config.yaml`:
 
 ```yaml
 openai:
-  model: "gpt-4o-mini"   # or "gpt-4o", "gpt-4-turbo", etc.
+  model: "gpt-4o-mini"      # digest model
+  eval_model: "gpt-4o-mini" # evaluation model (optional override)
   max_tokens: 4000
 ```
 
@@ -155,15 +198,16 @@ cd ai-news-extractor-summary
 cp .env.example .env
 # Edit .env with your credentials
 
-# 2. Start the dashboard (persistent)
-docker compose up dashboard
-# Open http://localhost:8501
+# 2. Start persistent services
+docker compose up dashboard api
+# Dashboard: http://localhost:8501
+# API:       http://localhost:8000
 
-# 3. Run the aggregator once (scrape + summarize + email)
+# 3. Run the aggregator once (scrape + summarize + evaluate + email)
 docker compose run --rm aggregator
 
-# Dry run (no email)
-docker compose run --rm aggregator python main.py --dry-run
+# Dry run (no email, no evaluation)
+docker compose run --rm aggregator python main.py --dry-run --skip-eval
 ```
 
 ### Schedule with cron (Linux/Mac server)
@@ -216,7 +260,7 @@ kubectl logs -l job-name=ai-news-test -f
 | Server / cluster | **Free** if self-hosted (e.g. Oracle Cloud free tier) |
 | Docker Hub | **Free** (free tier) |
 | OpenAI API (summaries) | ~$1–10/month depending on model and frequency |
-| OpenAI API (embeddings) | ~$0.02/month (`text-embedding-3-small`) |
+| OpenAI API (embeddings + eval) | ~$0.05/month (`text-embedding-3-small` + `gpt-4o-mini`) |
 | Gmail SMTP | **Free** |
 
 Each user runs their own instance with their own API key — no shared cost.

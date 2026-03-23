@@ -64,6 +64,17 @@ class Storage:
                 error TEXT
             )
         """)
+
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                article_url TEXT NOT NULL,
+                faithfulness INTEGER NOT NULL,
+                coverage INTEGER NOT NULL,
+                note TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         self.conn.commit()
 
     def filter_new(self, articles: list[Article]) -> list[Article]:
@@ -194,6 +205,47 @@ class Storage:
         cursor = self.conn.execute(
             "SELECT id, started_at, finished_at, status, articles_scraped, articles_new, error "
             "FROM runs ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        )
+        cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    # --- Evaluations ---
+
+    def save_evaluations(self, evaluations: dict[str, dict]):
+        """Save LLM-as-judge scores keyed by article URL."""
+        for url, scores in evaluations.items():
+            self.conn.execute(
+                "INSERT INTO evaluations (article_url, faithfulness, coverage, note) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    url,
+                    scores.get("faithfulness", 0),
+                    scores.get("coverage", 0),
+                    scores.get("note", ""),
+                ),
+            )
+        self.conn.commit()
+
+    def get_quality_trend(self, days: int = 30) -> list[dict]:
+        """Return daily average faithfulness and coverage scores for trending chart."""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cursor = self.conn.execute(
+            "SELECT substr(created_at, 1, 10) as day, "
+            "ROUND(AVG(faithfulness), 1) as avg_faithfulness, "
+            "ROUND(AVG(coverage), 1) as avg_coverage, "
+            "COUNT(*) as count "
+            "FROM evaluations WHERE created_at >= ? "
+            "GROUP BY day ORDER BY day",
+            (cutoff,),
+        )
+        cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_evaluations(self, limit: int = 100) -> list[dict]:
+        cursor = self.conn.execute(
+            "SELECT article_url, faithfulness, coverage, note, created_at "
+            "FROM evaluations ORDER BY created_at DESC LIMIT ?",
             (limit,),
         )
         cols = [d[0] for d in cursor.description]

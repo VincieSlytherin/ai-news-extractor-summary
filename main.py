@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 
 from deduper import filter_semantic_duplicates
 from emailer import send_email
+from evaluator import evaluate_batch
+from rag import get_collection, upsert_articles
 from scraper import enrich_with_full_content, scrape_all
 from storage import Storage
 from summarizer import summarize, summarize_articles
@@ -64,10 +66,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip semantic deduplication (saves embedding API tokens)",
     )
+    parser.add_argument(
+        "--skip-eval",
+        action="store_true",
+        help="Skip LLM-as-judge evaluation (saves API tokens)",
+    )
     return parser.parse_args()
 
 
-async def run(dry_run: bool = False, semantic_dedup: bool = True):
+async def run(dry_run: bool = False, semantic_dedup: bool = True, run_eval: bool = True):
     config = load_config()
     db = Storage(str(DATA_DIR / "news.db"))
     run_id = db.start_run()
@@ -130,12 +137,24 @@ async def run(dry_run: bool = False, semantic_dedup: bool = True):
                 print(summary)
                 print("=" * 60)
 
-        # 8. Persist to DB
+        # 8. Evaluation (LLM-as-judge)
+        if run_eval:
+            evaluations = evaluate_batch(new_articles, article_summaries, config["openai"])
+            db.save_evaluations(evaluations)
+
+        # 9. Persist articles + digest to DB
         db.save(new_articles, summaries=article_summaries, embeddings=article_embeddings)
         db.save_digest(today, summary, article_count=len(new_articles))
         logger.info("Saved %d articles and digest to database", len(new_articles))
 
-        # 9. Cleanup records older than 30 days
+        # 10. Upsert into ChromaDB for semantic search
+        try:
+            collection = get_collection(config["openai"]["api_key"])
+            upsert_articles(new_articles, article_summaries, article_embeddings, collection)
+        except Exception as e:
+            logger.warning("ChromaDB upsert skipped: %s", e)
+
+        # 11. Cleanup records older than 30 days
         db.cleanup(days=30)
 
         db.finish_run(
@@ -154,7 +173,11 @@ async def run(dry_run: bool = False, semantic_dedup: bool = True):
 
 def main():
     args = parse_args()
-    asyncio.run(run(dry_run=args.dry_run, semantic_dedup=not args.no_semantic_dedup))
+    asyncio.run(run(
+        dry_run=args.dry_run,
+        semantic_dedup=not args.no_semantic_dedup,
+        run_eval=not args.skip_eval,
+    ))
 
 
 if __name__ == "__main__":
